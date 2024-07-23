@@ -66,8 +66,6 @@ func (rf *Raft) convertToLeader() {
 
 func (rf *Raft) convertToFollower() {
 	rf.state = Follower
-	rf.nextIndex = nil
-	rf.matchIndex = nil
 	rf.votedFor = -1
 	rf.lastHeartbeat = time.Now()
 	DPrintf("Server %v becomes follower at TERM %v", rf.me, rf.currentTerm)
@@ -290,20 +288,24 @@ func (rf *Raft) broadcastAppendEntries() {
 	for peer := range rf.peers {
 		if peer != rf.me {
 			go func(peer int) {
-				for {
+				for rf.killed() == false && rf.state == Leader {
+					DPrintf("Leader %v is broadcasting a new Entry at TERM %v to Follower %v", rf.me, rf.currentTerm, peer)
 					rf.mu.Lock()
+					entries := []LogEntry{}
+					if rf.nextIndex[peer] < len(rf.log) {
+						entries = rf.log[rf.nextIndex[peer]:]
+					}
 					request := AppendEntriesArgs{
 						Term:         rf.currentTerm,
 						LeaderId:     rf.me,
 						PrevLogIndex: rf.nextIndex[peer] - 1,
 						PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
-						Entries:      rf.log[rf.nextIndex[peer]:],
+						Entries:      entries,
 						LeaderCommit: rf.commitIndex,
 					}
 					rf.mu.Unlock()
 
 					var reply AppendEntriesReply
-					DPrintf("Leader %v is broadcasting a new Entry at TERM %v to Follower %v", rf.me, rf.currentTerm, peer)
 					if rf.sendAppendEntries(peer, &request, &reply) {
 						rf.mu.Lock()
 						if reply.Term > rf.currentTerm {
