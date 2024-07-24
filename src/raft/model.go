@@ -44,6 +44,7 @@ type Raft struct {
 	electionTimeout time.Duration
 	lastHeartbeat   time.Time
 	applyCh         chan ApplyMsg
+	snapShotIndex   int
 }
 
 type RequestVoteArgs struct {
@@ -76,6 +77,21 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Offset            int
+	Data              []byte
+	Done              bool
+}
+
+type InstallSnapshotReply struct {
 	Term    int
 	Success bool
 }
