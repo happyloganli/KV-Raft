@@ -14,40 +14,36 @@ const (
 	Leader    State = "Leader"
 )
 
-const (
-	ElectionTimeoutMin = 350 * time.Millisecond
-	ElectionTimeoutMax = 500 * time.Millisecond
-)
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
 	currentTerm int
 	votedFor    int
 	log         []LogEntry
 
-	commitIndex int
-	lastApplied int
+	commitIndex      int
+	lastApplied      int
+	snapshottedIndex int
 
 	nextIndex  []int
 	matchIndex []int
 
-	state           State
-	electionTimeout time.Duration
-	lastHeartbeat   time.Time
-	applyCh         chan ApplyMsg
-	snapShotIndex   int
+	state          State
+	lastHeartbeat  time.Time
+	applyCh        chan ApplyMsg
+	electionTimer  *time.Timer
+	heartbeatTimer *time.Timer
+
+	applyCond      *sync.Cond
+	replicatorCond []*sync.Cond
 }
 
-type RequestVoteArgs struct {
+type RequestVoteRequest struct {
 	// Your data here (3A, 3B).
 	Term         int
 	CandidateId  int
@@ -55,19 +51,19 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
-type RequestVoteReply struct {
+type RequestVoteResponse struct {
 	// Your data here (3A).
 	Term        int
 	VoteGranted bool
-	VoterId     int
 }
 
 type LogEntry struct {
 	Term    int
 	Command interface{}
+	Index   int
 }
 
-type AppendEntriesArgs struct {
+type AppendEntriesRequest struct {
 	Term         int
 	LeaderId     int
 	PrevLogIndex int
@@ -76,12 +72,12 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
-type AppendEntriesReply struct {
+type AppendEntriesResponse struct {
 	Term    int
 	Success bool
 }
 
-type InstallSnapshotArgs struct {
+type InstallSnapshotRequest struct {
 	Term              int
 	LeaderId          int
 	LastIncludedIndex int
@@ -91,7 +87,7 @@ type InstallSnapshotArgs struct {
 	Done              bool
 }
 
-type InstallSnapshotReply struct {
+type InstallSnapshotResponse struct {
 	Term    int
 	Success bool
 }

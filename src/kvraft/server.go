@@ -18,11 +18,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Type  string // "Put", "Append", or "Get"
+	Key   string
+	Value string
+	Id    int64 // Client ID
+	Seq   int   // Request sequence number
 }
 
 type KVServer struct {
@@ -32,22 +33,79 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate       int // snapshot if log grows this big
+	data               map[string]string
+	lastAppliedRequest map[int64]int
+	waitChans          map[int]chan ApplyResult
 
 	// Your definitions here.
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+
+	index, _, isLeader := kv.rf.Start(Op{
+		Type: "Get",
+		Key:  args.Key,
+		Id:   args.ClientId,
+		Seq:  args.RequestId,
+	})
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+	}
+
+	ch := kv.getWaitChan(index)
+	result := <-ch
+
+	if result.Err == OK {
+		reply.Err = OK
+		reply.Value = result.Value
+	} else {
+		reply.Err = ErrWrongLeader
+	}
+
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	op := Op{
+		Type:  "Put",
+		Key:   args.Key,
+		Value: args.Value,
+		Id:    args.ClientId,
+		Seq:   args.RequestId,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	ch := kv.getWaitChan(index)
+	result := <-ch
+
+	reply.Err = result.Err
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	op := Op{
+		Type:  "Append",
+		Key:   args.Key,
+		Value: args.Value,
+		Id:    args.ClientId,
+		Seq:   args.RequestId,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	ch := kv.getWaitChan(index)
+	result := <-ch
+
+	reply.Err = result.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -89,13 +147,79 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.data = make(map[string]string)
+	kv.lastAppliedRequest = make(map[int64]int)
+	kv.waitChans = make(map[int]chan ApplyResult)
 
-	// You may need initialization code here.
+	go kv.applyOperations()
 
 	return kv
+}
+
+func (kv *KVServer) applyOperations() {
+	for applyMsg := range kv.applyCh {
+		if applyMsg.CommandValid {
+			op := applyMsg.Command.(Op)
+			var result ApplyResult
+
+			kv.mu.Lock()
+			// Check if this operation has already been applied
+			if seq, ok := kv.lastAppliedRequest[op.Id]; !ok || op.Seq > seq {
+				switch op.Type {
+				case "Put":
+					kv.data[op.Key] = op.Value
+					result.Err = OK
+				case "Append":
+					kv.data[op.Key] += op.Value
+					result.Err = OK
+				case "Get":
+					result.Value = kv.data[op.Key]
+					result.Err = OK
+				}
+
+				kv.lastAppliedRequest[op.Id] = op.Seq
+			} else {
+				// Operation has already been applied
+				result.Err = OK
+				if op.Type == "Get" {
+					result.Value = kv.data[op.Key]
+				}
+			}
+
+			// Signal the result back to the waiting goroutine
+			if ch, ok := kv.waitChans[applyMsg.CommandIndex]; ok {
+				ch <- result
+				close(ch)
+				delete(kv.waitChans, applyMsg.CommandIndex)
+			}
+
+			kv.mu.Unlock()
+		}
+	}
+}
+
+func (kv *KVServer) getWaitChan(index int) chan ApplyResult {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, ok := kv.waitChans[index]; !ok {
+		kv.waitChans[index] = make(chan ApplyResult, 1)
+	}
+	return kv.waitChans[index]
+}
+
+func (kv *KVServer) notifyWaitChan(index int, result ApplyResult) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if ch, ok := kv.waitChans[index]; ok {
+		ch <- result
+		close(ch)
+		delete(kv.waitChans, index)
+	}
+}
+
+func (kv *KVServer) isDuplicateRequest(clientId int64, requestId int) bool {
+	lastSeq, exists := kv.lastAppliedRequest[clientId]
+	return exists && requestId <= lastSeq
 }

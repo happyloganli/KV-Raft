@@ -56,19 +56,19 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	// Check that the index is valid
-	if index <= rf.snapShotIndex {
+	if index <= rf.snapshottedIndex {
 		return // Snapshot is already up-to-date
 	}
 	DPrintf("Service create snapshot at index %v", index)
 	// Update the snapshot and log
-	rf.log = rf.log[index-rf.snapShotIndex:]
-	rf.snapShotIndex = index
+	rf.log = rf.log[index-rf.snapshottedIndex:]
+	rf.snapshottedIndex = index
 
 	// Persist the state and snapshot
 	rf.persist(snapshot)
 }
 
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotRequest, reply *InstallSnapshotResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
@@ -82,19 +82,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// Update term and convert to follower if necessary
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.convertToFollower()
+		rf.ChangeState(Follower)
 	}
 
 	rf.lastHeartbeat = time.Now()
 
 	// Check if the snapshot is for an index we have already applied
-	if args.LastIncludedIndex <= rf.snapShotIndex {
+	if args.LastIncludedIndex <= rf.snapshottedIndex {
 		reply.Success = false
 		return
 	}
 
-	rf.log = rf.log[args.LastIncludedIndex-rf.snapShotIndex:]
-	rf.snapShotIndex = args.LastIncludedIndex
+	rf.log = rf.log[args.LastIncludedIndex-rf.snapshottedIndex:]
+	rf.snapshottedIndex = args.LastIncludedIndex
 
 	// Notify the service of the snapshot
 	rf.applyCh <- ApplyMsg{
@@ -107,4 +107,34 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persist(args.Data)
 
 	reply.Success = true
+}
+
+func (rf *Raft) generateInstallSnapshotRequest() InstallSnapshotRequest {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+
+	request := InstallSnapshotRequest{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.snapshottedIndex,
+		LastIncludedTerm:  rf.log[rf.snapshottedIndex].Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	return request
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(peer int, request InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	if response.Term > rf.currentTerm {
+		rf.currentTerm = response.Term
+		rf.ChangeState(Follower)
+		return
+	}
+
+	rf.nextIndex[peer] = request.LastIncludedIndex + 1
+	rf.matchIndex[peer] = request.LastIncludedIndex
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, request InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", request, response)
+	return ok
 }
